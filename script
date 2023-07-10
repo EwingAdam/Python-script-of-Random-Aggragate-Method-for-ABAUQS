@@ -1,0 +1,551 @@
+from abaqus import *
+from abaqusConstants import *
+from part import *
+import numpy as np
+import random
+import math
+import mesh
+import regionToolset
+import part
+
+session.journalOptions.setValues(replayGeometry = COORDINATE, recoverGeometry=COORDINATE)
+
+d_box = 25 
+c = 1
+x_max = d_box - c
+x_min = c
+y_max = d_box - c
+y_min = c
+z_max = d_box - c
+z_min = c
+r_coarse_min = 4
+r_coarse_max = 5
+r_fine_min = 0.5
+r_fine_max = 2
+volume_percentage_of_fine = 0.10
+volume_percentage_of_coarse = 0.1
+tol_edge_up = 3
+tol_edge_down = 0.1
+count_edge_total = 100
+count_inner_total = 200
+volume_box = d_box**3
+r_crack = 0.001*100
+thickness_ITZ = 0.1
+D_cement = 1
+D_crack_ = 10
+D_Agg = 0.0001
+D_ITZ = 10
+meshsize_Crack = 1.0
+meshsize_Crack_min = r_crack
+meshsize_Cement = 1.0
+meshsize_Cement_min = 0.5
+deviationFactor_Cement = 0.8
+meshsize_ITZ = 1.0
+meshsize_ITZ_min = 0.1
+meshsize_Agg = 1.0
+meshsize_Agg_min = 0.1
+
+myModel = mdb.models["Model-1"]
+myModel.setValues(absoluteZero=-273)
+
+mysketch_1 = myModel.ConstrainedSketch(name='mysketch_1', sheetSize=200.0)
+mysketch_1.rectangle(point1=(0.0, 0.0), point2=(d_box, d_box))
+myPart_base = myModel.Part(name='Part_Base', dimensionality=THREE_D, type=DEFORMABLE_BODY)
+myPart_base.BaseSolidExtrude(sketch=mysketch_1, depth=d_box)
+del mysketch_1
+
+def create_fine_aggregate(diameter,id):
+    partName = "Part_Agg_fine_{}".format(id)
+    mysketch_2 = myModel.ConstrainedSketch(name='mysketch_2', sheetSize=200.0)
+    mysketch_2.ConstructionLine(point1=(0.0, -100.0), point2=(0.0, 100.0))
+    curve = mysketch_2.CircleByCenterPerimeter(center=(0.0, 0.0), point1=(diameter/2.0, 0.0))
+    mysketch_2.autoTrimCurve(curve1=curve, point1=(-diameter/2.0, 0.0))
+    mysketch_2.Line(point1=(0.0, diameter/2.0), point2=(0.0, -diameter/2.0))
+    myPart2 = myModel.Part(name=partName, dimensionality=THREE_D, type=DEFORMABLE_BODY)
+    myPart2.BaseSolidRevolve(sketch=mysketch_2, angle=360.0, flipRevolveDirection=OFF)
+
+def create_coarse_aggregate(diameter,id):
+    partName = "Part_Agg_coarse_{}".format(id)
+    mysketch_2 = myModel.ConstrainedSketch(name='mysketch_2', sheetSize=200.0)
+    mysketch_2.ConstructionLine(point1=(0.0, -100.0), point2=(0.0, 100.0))
+    curve = mysketch_2.CircleByCenterPerimeter(center=(0.0, 0.0), point1=(diameter/2.0, 0.0))
+    mysketch_2.autoTrimCurve(curve1=curve, point1=(-diameter/2.0, 0.0))
+    mysketch_2.Line(point1=(0.0, diameter/2.0), point2=(0.0, -diameter/2.0))
+    myPart2 = myModel.Part(name=partName, dimensionality=THREE_D, type=DEFORMABLE_BODY)
+    myPart2.BaseSolidRevolve(sketch=mysketch_2, angle=360.0, flipRevolveDirection=OFF)
+
+def create_ITZ_base(diameter,id):
+    partName = "Part_ITZ_base_{}".format(id)
+    mysketch_2 = myModel.ConstrainedSketch(name='mysketch_2', sheetSize=200.0)
+    mysketch_2.ConstructionLine(point1=(0.0, -100.0), point2=(0.0, 100.0))
+    curve = mysketch_2.CircleByCenterPerimeter(center=(0.0, 0.0), point1=(diameter/2.0, 0.0))
+    mysketch_2.autoTrimCurve(curve1=curve, point1=(-diameter/2.0, 0.0))
+    mysketch_2.Line(point1=(0.0, diameter/2.0), point2=(0.0, -diameter/2.0))
+    myPart2 = myModel.Part(name=partName, dimensionality=THREE_D, type=DEFORMABLE_BODY)
+    myPart2.BaseSolidRevolve(sketch=mysketch_2, angle=360.0, flipRevolveDirection=OFF)    
+
+def V_agg(radius):
+    return  4/3 * math.pi*radius**3
+
+def interCheck(point,aggregate,radius1):
+    sign = True
+    for p in aggregate:
+        radius2 = p[0]
+        if math.sqrt((point[0]-p[1])**2+(point[1]-p[2])**2+(point[2]-p[3])**2) <= (radius1+radius2):
+            sign = False
+            break
+    return sign
+
+def distance_point_to_line_segment(A, B, C):
+    def distance_point_to_line(p, q, r):
+        x1, y1, z1 = q
+        x2, y2, z2 = r
+        return abs((y2-y1)*(p[0]-x1) - (x2-x1)*(p[1]-y1) + (z2-z1)*(p[2]-z1)) / math.sqrt((y2-y1)**2 + (x2-x1)**2 + (z2-z1)**2)
+    x1, y1, z1 = A
+    x2, y2, z2 = B
+    x3, y3, z3 = C
+    t = ((x3-x1)*(x2-x1) + (y3-y1)*(y2-y1) + (z3-z1)*(z2-z1)) / ((x2-x1)**2 + (y2-y1)**2 + (z2-z1)**2)
+    px = x1 + t * (x2-x1)
+    py = y1 + t * (y2-y1)
+    pz = z1 + t * (z2-z1)
+    P = (px, py, pz)
+    if px >= min(x1, x2) and px <= max(x1, x2) and py >= min(y1, y2) and py <= max(y1, y2) and pz >= min(z1, z2) and pz <= max(z1, z2):
+        return distance_point_to_line(C, A, B)
+    return d_box
+def get_d(p1,p2):  
+    return math.sqrt((p1[0]-p2[0])**2+(p1[1]-p2[1])**2+(p1[2]-p2[2])**2)
+
+real_aggregate = []
+center_coarse = []
+volume_coarse = 0
+volume_percentage_of_coarse_cal = 0
+agg_coarse = []
+crack_ITZ_0 = []
+id_coarse = -1
+while volume_percentage_of_coarse_cal < volume_percentage_of_coarse:
+        count_try_times = 0
+        while True:
+            count_try_times += 1
+            if count_try_times >10000:
+                break
+            radius = random.uniform(r_coarse_min,r_coarse_max)
+            radius1 = radius + thickness_ITZ
+            radius_tol = radius1*1.02
+            disX = random.uniform(radius_tol+x_min, x_max-radius_tol)
+            disY = random.uniform(radius_tol+y_min, y_max-radius_tol)
+            disZ = random.uniform(radius_tol+z_min, z_max-radius_tol)
+            if len(center_coarse) == 0:
+                id_coarse = id_coarse + 1
+                create_coarse_aggregate(radius*2,id_coarse)
+                create_ITZ_base(radius1*2,id_coarse)
+                center_coarse.append([disX,disY,disZ])
+                agg_coarse.append([radius_tol,disX,disY,disZ,radius])
+                crack_ITZ_0.append([radius1,disX,disY,disZ])
+                volume_coarse = volume_coarse + V_agg(radius)
+                volume_percentage_of_coarse_cal = volume_coarse/volume_box
+                break
+            else:
+                if interCheck([disX,disY,disZ],agg_coarse,radius_tol):
+                    id_coarse = id_coarse + 1
+                    create_coarse_aggregate(radius*2,id_coarse)
+                    create_ITZ_base(radius1*2,id_coarse)
+                    center_coarse.append([disX,disY,disZ])
+                    agg_coarse.append([radius_tol,disX,disY,disZ,radius])
+                    crack_ITZ_0.append([radius1,disX,disY,disZ])
+                    volume_coarse = volume_coarse + V_agg(radius)
+                    volume_percentage_of_coarse_cal = volume_coarse/volume_box
+                    break
+                else:
+                    continue
+
+center_fine = []
+volume_fine = 0
+volume_percentage_of_fine_cal = 0
+agg_fine = []
+real_aggregate = agg_coarse
+id_fine = -1
+while volume_percentage_of_fine_cal < volume_percentage_of_fine:
+        count_try_times = 0
+        while True:
+            count_try_times += 1
+            if count_try_times >10000:
+                break
+            radius = random.uniform(r_fine_min,r_fine_max)*1.02
+            radius1 = radius + thickness_ITZ
+            radius_tol = radius1*1.02
+            disX = random.uniform(radius_tol+x_min, x_max-radius_tol)
+            disY = random.uniform(radius_tol+y_min, y_max-radius_tol)
+            disZ = random.uniform(radius_tol+z_min, z_max-radius_tol)
+            if interCheck([disX,disY,disZ],real_aggregate,radius_tol):
+                id_fine = id_fine + 1
+                create_fine_aggregate(radius*2,id_fine)
+                create_ITZ_base(radius1*2,id_fine+id_coarse+1)
+                center_fine.append([disX,disY,disZ])
+                agg_fine.append([radius_tol,disX,disY,disZ])
+                real_aggregate.append([radius_tol,disX,disY,disZ,radius])
+                crack_ITZ_0.append([radius1,disX,disY,disZ])
+                volume_fine = volume_fine + V_agg(radius1)
+                volume_percentage_of_fine_cal = volume_fine/volume_box
+                break
+            else:
+                continue
+
+aggregate_edge = []
+count_edge = 0
+for i in range(len(real_aggregate)):
+    if tol_edge_down < (real_aggregate[i][1]-real_aggregate[i][0]-0) < tol_edge_up or tol_edge_down < (real_aggregate[i][2]-real_aggregate[i][0]-0) < tol_edge_up \
+    or tol_edge_down < (real_aggregate[i][3]-real_aggregate[i][0]-0) < tol_edge_up or tol_edge_down < (d_box-real_aggregate[i][1]-real_aggregate[i][0]) < tol_edge_up \
+    or tol_edge_down < (d_box-real_aggregate[i][2]-real_aggregate[i][0]) < tol_edge_up or tol_edge_down < (d_box-real_aggregate[i][3]-real_aggregate[i][0]) < tol_edge_up:
+        aggregate_edge.append(real_aggregate[i])
+def min_edge(i):
+    x = aggregate_edge[i][1]
+    y = aggregate_edge[i][2]
+    z = aggregate_edge[i][3]
+    r_tot = aggregate_edge[i][0]
+    r_agg = aggregate_edge[i][4]
+    d_p_x1 = abs(x-r_agg-0)
+    d_p_y1 = abs(y-r_agg-0)
+    d_p_z1 = abs(z-r_agg-0)
+    d_p_x2 = abs(d_box-x-r_agg)
+    d_p_y2 = abs(d_box-y-r_agg)
+    d_p_z2 = abs(d_box-z-r_agg)
+    d_edgecrack = min(d_p_x1,d_p_x2,d_p_y1,d_p_y2,d_p_z1,d_p_z2)
+    if d_edgecrack == d_p_x1:
+        p_edge1 = (x-r_agg,y,z)
+        p_edge2 = (0,y,z)
+    if d_edgecrack == d_p_y1:
+        p_edge1 = (x,y-r_agg,z)
+        p_edge2 = (x,0,z)
+    if d_edgecrack == d_p_z1:
+        p_edge1 = (x,y,0)
+        p_edge2 = (x,y,z-r_agg)
+    if d_edgecrack == d_p_x2:
+        p_edge1 = (x+r_agg,y,z)
+        p_edge2 = (d_box,y,z)
+    if d_edgecrack == d_p_y2:
+        p_edge1 = (x,y+r_agg,z)
+        p_edge2 = (x,d_box,z)
+    if d_edgecrack == d_p_z2:
+        p_edge1 = (x,y,z+r_agg)
+        p_edge2 = (x,y,d_box)
+    edgecrack_info = [d_edgecrack,p_edge1,p_edge2]
+    return edgecrack_info
+aggregate_edge_crack = []
+point_edges = []
+point_edges_cells = []
+count_edge = 0
+random.shuffle(aggregate_edge)
+while True:
+    randedge = random.randint(0, len(aggregate_edge)-1)   
+    call_min_edge = min_edge(randedge)
+    p1 = call_min_edge[1]
+    p2 = call_min_edge[2]
+    point_edge = (p1,p2)
+    for i in range(len(real_aggregate)):
+        if distance_point_to_line_segment(p1,p2,(real_aggregate[i][1],real_aggregate[i][2],real_aggregate[i][3])) < r_crack + real_aggregate[i][0]:
+            continue
+    if get_d(p1,p2)<r_crack*2:
+        continue
+    point_edges.append(point_edge)
+    point_edges_cells.append([p1[0],p1[1],p1[2]])
+    count_edge = count_edge + 1
+    del aggregate_edge[randedge]
+    if count_edge > count_edge_total or len(aggregate_edge) == 0:
+        break
+point_inners = []
+point_inners_cells = []
+count_inner = 0
+
+def look_for_min(list):
+    min_second_elem = float('inf')
+    min_array = None
+    for arr in list:
+        if arr[1] < min_second_elem:
+            min_second_elem = arr[1]
+            min_array = arr    
+    return min_array[0]    
+
+while True:
+    look_for_shortest_d = []
+    randnum = random.randint(0, len(real_aggregate)-1)
+    r1 = real_aggregate[randnum][0]
+    location1 = real_aggregate[randnum][1:]
+    for i in range(len(real_aggregate)):
+        if i == randnum:
+            continue
+        r2 = real_aggregate[i][0]
+        location2 = real_aggregate[i][1:]
+        d_temp = math.sqrt((location2[0]-location1[0])**2+(location2[1]-location1[1])**2+(location2[2]-location1[2])**2)-r1-r2
+        look_for_shortest_d.append([i,d_temp])
+    pointid = look_for_min(look_for_shortest_d)
+    r1 = real_aggregate[randnum][4]
+    r2 = real_aggregate[pointid][4]
+    d_inner_point = math.sqrt((real_aggregate[pointid][1]-location1[0])**2+(real_aggregate[pointid][2]-location1[1])**2+(real_aggregate[pointid][3]-location1[2])**2)
+    d_inner_point_dir = ((real_aggregate[pointid][1]-location1[0])/d_inner_point, \
+                         (real_aggregate[pointid][2]-location1[1])/d_inner_point, \
+                         (real_aggregate[pointid][3]-location1[2])/d_inner_point)
+    point_inner1 = (location1[0]+r1*d_inner_point_dir[0],location1[1]+r1*d_inner_point_dir[1],location1[2]+r1*d_inner_point_dir[2])
+    point_inner2 = (real_aggregate[pointid][1] - r2*d_inner_point_dir[0], \
+                    real_aggregate[pointid][2] - r2*d_inner_point_dir[1], \
+                    real_aggregate[pointid][3] - r2*d_inner_point_dir[2])
+    point_tuple1 = (point_inner1,point_inner2)
+    point_tuple2 = (point_inner2,point_inner1)
+    for i in range(len(real_aggregate)):
+        if distance_point_to_line_segment(point_inner1,point_inner2,(real_aggregate[i][1],real_aggregate[i][2],real_aggregate[i][3])) < r_crack + real_aggregate[i][0]:
+            continue
+    if get_d(point_inner1,point_inner2)<r_crack*2:
+        continue       
+    if (point_tuple1 not in point_inners) and (point_tuple2 not in point_inners):
+        point_inners.append(point_tuple1)
+        point_inners_cells.append([point_tuple1[0][0],point_tuple1[0][1],point_tuple1[0][2]])
+        count_inner = count_inner + 1
+    if count_inner > count_inner_total:
+        break
+
+myAssembly = myModel.rootAssembly
+
+def cross_product(a, b):
+    x = a[1] * b[2] - a[2] * b[1]
+    y = a[2] * b[0] - a[0] * b[2]
+    z = a[0] * b[1] - a[1] * b[0]
+    return (x, y, z)
+
+def dot_product(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def normalize(vector):
+    length = math.sqrt(vector[0]**2 + vector[1]**2 + vector[2]**2)
+    if length != 0:
+        return (vector[0] / length, vector[1] / length, vector[2] / length)
+    else:
+        return vector
+
+def calculate_midpoint(A, B):
+    A = list(A)
+    B = list(B)
+    midpoint = (((A[0] + B[0]) / 2),((A[1] + B[1]) / 2),((A[2] + B[2]) / 2))
+    return midpoint
+
+def calculate_translation_and_rotation(AB, CD):
+    translation_vector = CD[0] - AB[0]
+    rotation_origin = CD[0]
+    rotation_axis = np.cross(AB[1] - AB[0],CD[1] - CD[0] )
+    rotation_norm = np.linalg.norm(rotation_axis)
+    rotation_angle = np.arccos(np.dot(CD[1] - CD[0], AB[1] - AB[0]) / (np.linalg.norm(CD[1] - CD[0]) * np.linalg.norm(AB[1] - AB[0])))
+    return translation_vector, rotation_origin, rotation_axis, rotation_angle
+
+index = -1
+crack_inner_info = []
+for point_inner in point_inners:
+    index = index + 1
+    p1 = point_inner[0]
+    p2 = point_inner[1]
+
+    d_crack = get_d(p1,p2)
+    P3 = (0,0,0)
+    P4 = (0,0,d_crack)
+    AB = np.array([list(P3), list(P4)])
+    CD = np.array([list(p1), list(p2)])
+    translation_vector, rotation_origin, rotation_axis, rotation_angle = calculate_translation_and_rotation(AB, CD)
+
+    myPart3 = myModel.Part(name='Part_Crack_inner_{}'.format(index), dimensionality=THREE_D, type=DEFORMABLE_BODY)
+    mySketch3 = myModel.ConstrainedSketch(name="sketch-3", sheetSize=200)
+    mySketch3.CircleByCenterPerimeter(center=(0.0, 0.0), point1=(r_crack, 0.0))
+    myPart3.BaseSolidExtrude(sketch=mySketch3, depth=d_crack)
+    crack_inner_info.append([translation_vector, rotation_origin, rotation_axis, math.degrees(rotation_angle)])
+
+crack_edge_info = []
+index = -1
+for point_edge in point_edges:
+    index = index + 1
+    p1 = point_edge[0] 
+    p2 = point_edge[1] 
+
+    d_crack = get_d(p1,p2)
+    P3 = (0,0,0) 
+    P4 = (0,0,d_crack) 
+    AB = np.array([list(P3), list(P4)])
+    CD = np.array([list(p1), list(p2)])
+    translation_vector, rotation_origin, rotation_axis, rotation_angle = calculate_translation_and_rotation(AB, CD)
+
+    myPart4 = myModel.Part(name='Part_Crack_edge_{}'.format(index), dimensionality=THREE_D, type=DEFORMABLE_BODY)
+    mySketch4 = myModel.ConstrainedSketch(name="sketch-3", sheetSize=200)
+    mySketch4.CircleByCenterPerimeter(center=(0.0, 0.0), point1=(r_crack, 0.0))
+    myPart4.BaseSolidExtrude(sketch=mySketch4, depth=d_crack)
+    crack_edge_info.append([translation_vector, rotation_origin, rotation_axis, math.degrees(rotation_angle)])
+
+base = myAssembly.Instance(name='Part_Base', part = myModel.parts["Part_Base"], dependent=ON)
+
+Agg_coarse_part_instance_list = []
+Agg_fine_part_instance_list = []
+for index in range(len(center_coarse)):
+    myAssembly.Instance(name='Part_Agg_coarse_{}'.format(index), part=myModel.parts["Part_Agg_coarse_{}".format(index)], dependent=ON)
+    myAssembly.translate(instanceList=('Part_Agg_coarse_{}'.format(index),), vector=tuple(center_coarse[index]))
+for index in range(len(center_fine)):
+    myAssembly.Instance(name='Part_Agg_fine_{}'.format(index), part=myModel.parts["Part_Agg_fine_{}".format(index)], dependent=ON)
+    myAssembly.translate(instanceList=('Part_Agg_fine_{}'.format(index),), vector=tuple(center_fine[index]))
+for i in range(len(center_coarse)):
+    part_instance1 = myAssembly.instances['Part_Agg_coarse_{}'.format(i)]
+    Agg_coarse_part_instance_list.append(part_instance1)
+for i in range(len(center_fine)):
+    part_instance2 = myAssembly.instances['Part_Agg_fine_{}'.format(i)]
+    Agg_fine_part_instance_list.append(part_instance2)
+
+Crack_inner_list = []
+for num in range(len(crack_inner_info)):
+    myInstance3 = myAssembly.Instance(name='Part_Crack_inner_{}'.format(num), part=myModel.parts["Part_Crack_inner_{}".format(num)], dependent=ON)
+    myAssembly.translate(instanceList=('Part_Crack_inner_{}'.format(num), ), vector=crack_inner_info[num][0])
+    myAssembly.rotate(instanceList=('Part_Crack_inner_{}'.format(num),), axisPoint=crack_inner_info[num][1], axisDirection=crack_inner_info[num][2],
+             angle = crack_inner_info[num][3])
+    Crack_inner_list.append(myInstance3)
+
+Crack_edge_list = []
+for num in range(len(crack_edge_info)):
+    myInstance4 = myAssembly.Instance(name='Part_Crack_edge_{}'.format(num), part=myModel.parts["Part_Crack_edge_{}".format(num)], dependent=ON)
+    myAssembly.translate(instanceList=('Part_Crack_edge_{}'.format(num), ), vector=crack_edge_info[num][0])
+    myAssembly.rotate(instanceList=('Part_Crack_edge_{}'.format(num),), axisPoint=crack_edge_info[num][1], axisDirection=crack_edge_info[num][2],
+             angle = crack_edge_info[num][3])
+    Crack_edge_list.append(myInstance4)
+
+crack_ITZ_0_list = []
+for index in range(len(center_coarse)+len(center_fine)):
+    myAssembly.Instance(name="Part_ITZ_base_{}".format(index), part=myModel.parts["Part_ITZ_base_{}".format(index)], dependent=ON)
+    myAssembly.translate(instanceList=('Part_ITZ_base_{}'.format(index),), vector=(crack_ITZ_0[index][1], crack_ITZ_0[index][2], crack_ITZ_0[index][3]))
+for i in range(len(crack_ITZ_0)):
+    part_instance = myAssembly.instances['Part_ITZ_base_{}'.format(i)]
+    crack_ITZ_0_list.append(part_instance)
+
+
+myModel.rootAssembly.regenerate()
+Agg_Coarse = myAssembly.InstanceFromBooleanMerge(name='Agg_Coarse', instances=tuple(Agg_coarse_part_instance_list), keepIntersections=ON,originalInstances=DELETE, domain=GEOMETRY)
+Agg_fine = myAssembly.InstanceFromBooleanMerge(name='Agg_fine', instances=tuple(Agg_fine_part_instance_list), keepIntersections=ON,originalInstances=DELETE, domain=GEOMETRY)
+Crack_edge = myAssembly.InstanceFromBooleanMerge(name='Crack_edge', instances=tuple(Crack_edge_list), keepIntersections=ON,originalInstances=DELETE, domain=GEOMETRY)
+Crack_inner = myAssembly.InstanceFromBooleanMerge(name='Crack_inner', instances=tuple(Crack_inner_list), keepIntersections=ON,originalInstances=DELETE, domain=GEOMETRY)
+crack_ITZ_base = myAssembly.InstanceFromBooleanMerge(name='crack_ITZ_base', instances=tuple(crack_ITZ_0_list), keepIntersections=ON,originalInstances=DELETE, domain=GEOMETRY)
+
+myModel.rootAssembly.regenerate()
+Agg = [Agg_Coarse,Agg_fine]
+All_Cracks = [Crack_edge,Crack_inner]
+
+myAssembly.InstanceFromBooleanMerge(name='Agg', instances=tuple(Agg), 
+    keepIntersections=ON,originalInstances=DELETE, domain=GEOMETRY)
+
+myAssembly.Instance(name='Crack_edge', part=myModel.parts['Crack_edge'], dependent=ON)
+myAssembly.Instance(name='Crack_inner', part=myModel.parts['Crack_inner'], dependent=ON)
+myAssembly.InstanceFromBooleanMerge(name='All_Crack', instances=(
+    myAssembly.instances['Crack_edge'], myAssembly.instances['Crack_inner'], ), 
+    originalInstances=DELETE, domain=GEOMETRY)
+
+myAssembly.Instance(name='All_Crack', part=myModel.parts['All_Crack'], dependent=ON)
+myAssembly.Instance(name='crack_ITZ_base', part=myModel.parts['crack_ITZ_base'], dependent=ON)
+myAssembly.InstanceFromBooleanCut(name='cracks_cut', 
+    instanceToBeCut=myAssembly.instances['All_Crack'], 
+    cuttingInstances=(myAssembly.instances['crack_ITZ_base'], ), originalInstances=DELETE)
+
+myAssembly.Instance(name='cracks_cut', part=myModel.parts['cracks_cut'], dependent=ON)
+myAssembly.Instance(name='crack_ITZ_base', part=myModel.parts['crack_ITZ_base'], dependent=ON)
+myAssembly.InstanceFromBooleanMerge(name='composite', instances=(
+    myAssembly.instances['cracks_cut'], myAssembly.instances['crack_ITZ_base'], ), 
+    originalInstances=DELETE, domain=GEOMETRY)
+
+myAssembly.Instance(name='crack_ITZ_base', part=myModel.parts['crack_ITZ_base'], dependent=ON)
+myAssembly.InstanceFromBooleanCut(name='Crack_ITZ', 
+    instanceToBeCut=myAssembly.instances['crack_ITZ_base'], 
+    cuttingInstances=(myAssembly.instances['Agg-1'], ), originalInstances=DELETE)
+
+myAssembly.Instance(name='composite', part=myModel.parts['composite'], dependent=ON)
+myAssembly.InstanceFromBooleanCut(name='base_holes', 
+    instanceToBeCut=myAssembly.instances['Part_Base'], 
+    cuttingInstances=(myAssembly.instances['composite'], ), originalInstances=DELETE)
+del myAssembly.features['Crack_ITZ-1']
+
+def create_materials_and_sections(material_name,section_name,diffusivity,solubility,concentration):
+    myModel.Material(name=material_name)
+    myModel.materials[material_name].Diffusivity(law=FICK, 
+        table=((diffusivity, concentration), ))
+    myModel.materials[material_name].Solubility(table=((solubility, 
+        ), ))
+    myModel.HomogeneousSolidSection(name=section_name,material=material_name, thickness=None)
+
+create_materials_and_sections('Material_Agg_Coarse','Section_Agg_Coarse',D_Agg,1,0)
+create_materials_and_sections('Material_Agg_Fine','Section_Agg_Fine',D_Agg,1,0)
+create_materials_and_sections('Material_Cement','Section_Cement',D_cement,1,0)
+create_materials_and_sections('Material_Crack','Section_Crack',D_crack_,1,0)
+create_materials_and_sections('Material_ITZ','Section_ITZ',D_ITZ,1,0)
+create_materials_and_sections('Material_Agg','Section_Agg',D_Agg,1,0)
+
+def assignmaterials(partname,coordinatelist,Sectionname):
+    for point in coordinatelist:
+        myPart = myModel.parts[partname]
+        region = regionToolset.Region(cells = myPart.cells.findAt((tuple(point),)))
+        myPart.SectionAssignment(region=region, sectionName=Sectionname, offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)
+
+def assign_materials(partname,Sectionname):
+    myPart = myModel.parts[partname]
+    region = regionToolset.Region(cells = myPart.cells)
+    myPart.SectionAssignment(region=region, sectionName=Sectionname, offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)
+
+point_cracks = point_edges_cells + point_inners_cells
+
+assign_materials('Agg','Section_Agg')
+assign_materials('cracks_cut','Section_Crack')
+assign_materials('Crack_ITZ','Section_ITZ')
+assign_materials('base_holes','Section_Cement')
+
+del myAssembly.features['Crack_edge-1']
+del myAssembly.features['Crack_inner-1']
+del myAssembly.features['All_Crack-1']
+del myAssembly.features['composite-1']
+del myAssembly.features['crack_ITZ_base-1']
+
+myPart = myModel.parts['base_holes']
+region = regionToolset.Region(cells = myPart.cells.findAt(((0,0,0),)))
+myPart.SectionAssignment(region=region, sectionName='Section_Cement', offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)
+myPart = myModel.parts['cracks_cut']
+myPart.Surface(side1Faces=myPart.faces[:], name='Surf-1')
+myPart = myModel.parts['base_holes']
+myPart.Surface(side1Faces=myPart.faces[:], name='Surf-1')
+region_base=myAssembly.instances['base_holes-1'].surfaces['Surf-1']
+region_crack=myAssembly.instances['cracks_cut-1'].surfaces['Surf-1']
+myModel.Tie(name='Constraint-1', master=region_base, slave=region_crack, 
+    positionToleranceMethod=COMPUTED, adjust=ON, tieRotations=ON, thickness=ON)
+myModel.MassDiffusionStep(name='Start_to_Diffuse', previous='Initial', 
+    timePeriod=100.0, maxNumInc=100, initialInc=1.0, minInc=0.01, 
+    maxInc=10.0, end=0.0, dcmax=200)
+
+region = regionToolset.Region(faces = myAssembly.instances['base_holes-1'].faces.findAt(((0.0001, 0.0001, d_box), )))
+myModel.ConcentrationBC(name='Diffusion', createStepName='Start_to_Diffuse', 
+    region=region, fixed=OFF, distributionType=UNIFORM, fieldName='', 
+    magnitude=1.234, amplitude=UNSET)
+
+myPart = myModel.parts['base_holes']
+elemType1 = mesh.ElemType(elemCode=DC3D8, elemLibrary=STANDARD)
+elemType2 = mesh.ElemType(elemCode=DC3D6, elemLibrary=STANDARD)
+elemType3 = mesh.ElemType(elemCode=DC3D4, elemLibrary=STANDARD)
+pickedRegions_base = myPart.cells
+myPart.setMeshControls(regions=pickedRegions_base, elemShape=TET, technique=FREE)
+pickedRegions_base =(myPart.cells,)
+myPart.setElementType(regions=pickedRegions_base, elemTypes=(elemType1, elemType2, 
+    elemType3))
+myPart.seedPart(size=meshsize_Cement, deviationFactor=deviationFactor_Cement, minSizeFactor=meshsize_Cement_min)
+myPart.generateMesh()
+
+myPart = myModel.parts['cracks_cut']
+elemType1 = mesh.ElemType(elemCode=DC3D8, elemLibrary=STANDARD)
+elemType2 = mesh.ElemType(elemCode=DC3D6, elemLibrary=STANDARD)
+elemType3 = mesh.ElemType(elemCode=DC3D4, elemLibrary=STANDARD)
+pickedRegions_cracks = myPart.cells
+myPart.setMeshControls(regions=pickedRegions_cracks, elemShape=TET, technique=FREE)
+pickedRegions_cracks =(myPart.cells,)
+myPart.setElementType(regions=pickedRegions_cracks, elemTypes=(elemType1, elemType2, 
+    elemType3))
+myPart.seedPart(size=meshsize_Crack, deviationFactor=0.1, minSizeFactor=meshsize_Crack_min)
+myPart.generateMesh()
+
+mdb.Job(name='Job-1', model='Model-1', description='', type=ANALYSIS, 
+    atTime=None, waitMinutes=0, waitHours=0, queue=None, memory=90, 
+    memoryUnits=PERCENTAGE, getMemoryFromAnalysis=True, 
+    explicitPrecision=SINGLE, nodalOutputPrecision=SINGLE, echoPrint=OFF, 
+    modelPrint=OFF, contactPrint=OFF, historyPrint=OFF, userSubroutine='', 
+    scratch='', resultsFormat=ODB, multiprocessingMode=DEFAULT, numCpus=8, 
+    numDomains=8, numGPUs=1)
